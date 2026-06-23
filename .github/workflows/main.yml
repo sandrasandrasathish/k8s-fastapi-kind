@@ -1,0 +1,70 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Docker Buildx ────────────────────────────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── 3. Build Docker image ──────────────────────────────────────
+      - name: Build Docker image
+        run: |
+          docker build -t backend-app:latest ./app
+
+      # ── 4. Create Kind cluster ─────────────────────────────────────
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1.9.0
+        with:
+          cluster_name: app-cluster
+
+      # ── 5. Load image into Kind ────────────────────────────────────
+      - name: Load image into Kind
+        run: |
+          kind load docker-image backend-app:latest --name app-cluster
+
+      # ── 6. Deploy manifests ────────────────────────────────────────
+      - name: Deploy to Kubernetes
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/postgres-secret.yaml
+          kubectl apply -f k8s/postgres-pvc.yaml
+          kubectl apply -f k8s/postgres-deployment.yaml
+          kubectl apply -f k8s/postgres-service.yaml
+          kubectl apply -f k8s/backend-deployment.yaml
+          kubectl apply -f k8s/backend-service.yaml
+
+      # ── 7. Wait for rollout ────────────────────────────────────────
+      - name: Wait for deployments
+        run: |
+          kubectl rollout status deployment/postgres -n app --timeout=120s
+          kubectl rollout status deployment/backend -n app --timeout=120s
+
+      # ── 8. Verify end-to-end ───────────────────────────────────────
+      - name: Verify deployment
+        run: |
+          kubectl port-forward svc/backend-service 8000:8000 -n app &
+          sleep 5
+          curl --fail http://localhost:8000/
+          curl --fail http://localhost:8000/health
+
+      # ── 9. Debug output on failure ─────────────────────────────────
+      - name: Debug on failure
+        if: failure()
+        run: |
+          kubectl get all -n app
+          kubectl describe pods -n app
+          kubectl logs -l app=backend -n app --tail=50
+          kubectl logs -l app=postgres -n app --tail=20
